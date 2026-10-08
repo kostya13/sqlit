@@ -69,6 +69,21 @@ class TreeFilterMixin:
     _tree_filter_match_index: int = 0
     _tree_original_labels: dict[int, str] = {}
     _tree_snapshot: list[_NodeSnapshot] | None = None
+    _tree_filter_scope_data: Any | None = None
+
+    def _schema_scope_data_under_cursor(self: TreeFilterMixinHost) -> Any | None:
+        """Return the `.data` of the nearest SchemaNode around the cursor.
+
+        Walks up from the cursor node (or the node itself); returns None
+        when no schema node encloses it, meaning the filter searches the
+        whole tree.
+        """
+        node = self.object_tree.cursor_node
+        while node is not None and node is not self.object_tree.root:
+            if self._get_node_kind(node) == "schema" and node.data is not None:
+                return node.data
+            node = node.parent
+        return None
 
     def action_tree_filter(self: TreeFilterMixinHost) -> None:
         """Open the tree filter."""
@@ -83,6 +98,10 @@ class TreeFilterMixin:
         self._tree_filter_matches = []
         self._tree_filter_match_index = 0
         self._tree_original_labels = {}
+        # Scope the search to the schema the cursor sits on (any node inside
+        # a SchemaNode, or the SchemaNode itself). No schema under the
+        # cursor — search the whole tree.
+        self._tree_filter_scope_data = self._schema_scope_data_under_cursor()
         # Freeze the currently loaded tree (incl. lazy-loaded children)
         # so we can restore it between keystrokes without calling
         # refresh_tree, which would lose async-loaded folder contents.
@@ -322,9 +341,19 @@ class TreeFilterMixin:
             self.tree_filter_input.set_filter("", 0, total)
             return
 
+        # Search only the scoped schema subtree when one was captured at
+        # filter-open time; otherwise search the whole tree.
+        search_root = self.object_tree.root
+        scope_data = self._tree_filter_scope_data
+        if scope_data is not None:
+            search_root = self._find_node_by_data(scope_data)
+            if search_root is None:
+                search_root = self.object_tree.root
+                self._tree_filter_scope_data = None
+
         # Find all matching nodes
         matches: list[Any] = []
-        self._find_matching_nodes(self.object_tree.root, matches)
+        self._find_matching_nodes(search_root, matches)
 
         self._tree_filter_matches = matches
         self._tree_filter_match_index = 0
@@ -414,6 +443,22 @@ class TreeFilterMixin:
             while current and current != self.object_tree.root:
                 ancestor_ids.add(id(current))
                 current = current.parent
+
+        # Schema scope: drop sibling subtrees outside the scoped schema so
+        # only the scoped path (connection → folder → schema → matches)
+        # remains visible.
+        scope_data = self._tree_filter_scope_data
+        if scope_data is not None:
+            scope_node = self._find_node_by_data(scope_data)
+            if scope_node is not None:
+                outside_ids = set()
+                current = scope_node.parent
+                while current is not None and current != self.object_tree.root:
+                    for sibling in current.children:
+                        if sibling is not scope_node and id(sibling) not in ancestor_ids:
+                            outside_ids.add(id(sibling))
+                    current = current.parent
+                ancestor_ids |= outside_ids
 
         # Hide non-matching, non-ancestor nodes
         self._set_node_visibility(
