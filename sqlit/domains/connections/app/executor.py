@@ -8,9 +8,10 @@ database connections that may not support concurrent operations.
 from __future__ import annotations
 
 import asyncio
+import queue
 import threading
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
@@ -22,10 +23,15 @@ T = TypeVar("T")
 class DatabaseExecutor:
     """Serializes database operations for a connection session.
 
-    All operations are submitted to a single-thread executor to ensure
-    only one operation runs at a time on the connection. This prevents
-    race conditions and ensures thread-safety for database drivers that
+    All operations run on a single daemon worker thread so only one
+    operation runs at a time on the connection. This prevents race
+    conditions and ensures thread-safety for database drivers that
     don't support concurrent operations on a single connection.
+
+    The worker is a daemon thread on purpose: a wedged DB call (server
+    accepting queries but never responding) must never keep the
+    interpreter alive past app exit. Aborting a running call is done via
+    ConnectionSession.abort_queries(), not here.
 
     Usage:
         # Synchronous submission (returns Future)
@@ -46,10 +52,13 @@ class DatabaseExecutor:
             session: The ConnectionSession this executor is bound to.
         """
         self._session = session
-        self._executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="sqlit-db-",
+        self._queue: queue.SimpleQueue[
+            tuple[Future[Any], Callable[[], Any]] | None
+        ] = queue.SimpleQueue()
+        self._thread = threading.Thread(
+            target=self._worker, name="sqlit-db", daemon=True
         )
+        self._thread.start()
         self._lock = threading.Lock()
         self._current_future: Future | None = None
         self._shutdown = False
@@ -68,7 +77,7 @@ class DatabaseExecutor:
         """Submit an operation to the executor.
 
         Operations are serialized - only one runs at a time on the
-        single-thread executor.
+        worker thread.
 
         Args:
             fn: The function to execute.
@@ -84,7 +93,8 @@ class DatabaseExecutor:
         with self._lock:
             if self._shutdown:
                 raise RuntimeError("Executor has been shut down")
-            future = self._executor.submit(fn, *args, **kwargs)
+            future: Future[T] = Future()
+            self._queue.put((future, lambda: fn(*args, **kwargs)))
             self._current_future = future
             return future
 
@@ -110,21 +120,48 @@ class DatabaseExecutor:
         future = self.submit(fn, *args, **kwargs)
         return await loop.run_in_executor(None, future.result)
 
+    def _worker(self) -> None:
+        """Run submitted calls serially. Exits on the None sentinel."""
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            future, call = item
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(call())
+            except BaseException as exc:
+                future.set_exception(exc)
+
     def shutdown(self, wait: bool = True) -> None:
         """Shutdown the executor.
 
         After shutdown, no new operations can be submitted.
 
         Args:
-            wait: If True, wait for pending operations to complete.
-                  If False, cancel pending operations immediately.
+            wait: If True, wait for queued operations to complete.
+                  If False, cancel queued (not yet started) operations and
+                  return immediately; a running call keeps going in the
+                  daemon thread until the connection is aborted via
+                  ConnectionSession.abort_queries().
         """
         with self._lock:
             if self._shutdown:
                 return
             self._shutdown = True
 
-        self._executor.shutdown(wait=wait, cancel_futures=not wait)
+        self._queue.put(None)
+        if not wait:
+            while True:
+                try:
+                    item = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if item is not None:
+                    item[0].cancel()
+        else:
+            self._thread.join()
 
     def __del__(self) -> None:
         """Destructor to ensure cleanup."""

@@ -1231,6 +1231,28 @@ class SSMSTUI(
         close_worker = getattr(self, "_close_process_worker_client", None)
         if callable(close_worker):
             close_worker()
+        # Interrupt wedged DB calls and close the session immediately:
+        # a query stuck on a silent server must not keep the process alive
+        # after the UI is gone. abort_queries() is synchronous and
+        # non-blocking; the remaining teardown (conn.close, tunnel stop)
+        # runs in a daemon thread so unmount never waits on the server.
+        session = getattr(self, "_session", None)
+        if session is not None:
+            self._session = None
+            try:
+                session.abort_queries()
+            except Exception:
+                pass
+
+            def _close_session() -> None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+
+            import threading as _threading
+
+            _threading.Thread(target=_close_session, daemon=True).start()
 
     def _startup_stamp(self, name: str) -> None:
         if not self._startup_profile:

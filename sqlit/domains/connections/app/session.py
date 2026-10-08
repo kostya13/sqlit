@@ -222,6 +222,35 @@ class ConnectionSession:
         self._connection = self._provider.connection_factory.connect(connect_config)
         self._config = new_config
 
+    def abort_queries(self) -> None:
+        """Interrupt a running DB call so shutdown never blocks on it.
+
+        A driver call stuck on a silent server (e.g. psycopg2 reading a
+        socket response forever) cannot be interrupted by conn.close() —
+        close itself blocks while a query is in flight. Shutting the
+        socket down (SHUT_RDWR) makes the blocked read fail immediately,
+        which unblocks the executor thread and anything waiting on its
+        future. Safe to call from any thread, repeatedly, on any driver:
+        connections without a socket fd (e.g. sqlite) are skipped.
+        """
+        connection = self._connection
+        if connection is None:
+            return
+        try:
+            fd = connection.fileno()
+        except Exception:
+            return
+        if not isinstance(fd, int) or fd < 0:
+            return
+        try:
+            import socket as _socket
+
+            sock = _socket.socket(fileno=fd)
+            sock.shutdown(_socket.SHUT_RDWR)
+            sock.detach()  # do not close the fd out from under the driver
+        except OSError:
+            pass
+
     def close(self) -> None:
         """Close the session and release all resources.
 
@@ -234,7 +263,14 @@ class ConnectionSession:
         if self._closed:
             return
 
-        # Shutdown executor first (don't wait for pending operations)
+        # Interrupt any in-flight DB call first: conn.close() below blocks
+        # while a query is stuck reading from a silent server.
+        try:
+            self.abort_queries()
+        except Exception:
+            pass
+
+        # Shutdown executor (don't wait for pending operations)
         if self._executor is not None:
             try:
                 self._executor.shutdown(wait=False)
