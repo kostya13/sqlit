@@ -9,8 +9,6 @@ from sqlit.domains.query.completion import extract_table_refs
 from sqlit.shared.ui.protocols import AutocompleteMixinHost
 from sqlit.shared.ui.spinner import Spinner
 
-SCHEMA_PROCESS_BATCH_SIZE = 200
-
 
 def _dedupe_routines(routines: list[Any]) -> list[Any]:
     """Deduplicate routines without collapsing equal names in other schemas."""
@@ -97,14 +95,44 @@ class AutocompleteSchemaMixin:
                     db_arg = database
                     if hasattr(self, "_get_metadata_db_arg"):
                         db_arg = self._get_metadata_db_arg(database)
-                    columns = self._run_db_call(
-                        provider.schema_inspector.get_columns,
-                        connection,
-                        actual_table_name,
-                        db_arg,
-                        schema_name,
-                    )
-                    column_names = [c.name for c in columns]
+                    # Prefer the process worker: it owns a dedicated schema
+                    # connection, so column loads never queue behind a slow
+                    # query hogging the session executor (the "Loading..."
+                    # autocomplete wedge on slow servers).
+                    client = None
+                    if hasattr(self, "_use_process_worker") and hasattr(self, "_get_process_worker_client"):
+                        try:
+                            if self._use_process_worker(provider):
+                                client = self._get_process_worker_client()
+                        except Exception:
+                            client = None
+                    if client is not None and self.current_config is not None:
+                        outcome = client.list_columns(
+                            config=self.current_config,
+                            database=database,
+                            schema=schema_name,
+                            name=actual_table_name,
+                        )
+                        error = getattr(outcome, "error", None)
+                        if error:
+                            raise RuntimeError(error)
+                        if getattr(outcome, "cancelled", False):
+                            self._columns_loading.discard(table_name)
+                            return
+                        raw_columns = outcome.columns or []
+                        column_names = [
+                            c.name if hasattr(c, "name") else str(c)
+                            for c in raw_columns
+                        ]
+                    else:
+                        columns = self._run_db_call(
+                            provider.schema_inspector.get_columns,
+                            connection,
+                            actual_table_name,
+                            db_arg,
+                            schema_name,
+                        )
+                        column_names = [c.name for c in columns]
                 except Exception:
                     self.call_from_thread(
                         self._on_autocomplete_columns_error,
@@ -656,46 +684,21 @@ class AutocompleteSchemaMixin:
         token: int,
         on_complete: Any,
     ) -> None:
-        total = len(items)
-        if total == 0:
-            on_complete()
+        """Apply schema entries in one pass on the main thread.
+
+        The per-entry work is plain list/dict inserts (microseconds each, even
+        for ~4k entries), so idle-gated batching only delayed autocomplete
+        readiness without protecting the UI. Token checks still discard stale
+        results after a reconnect/database switch.
+        """
+        if token != getattr(self, "_schema_process_token", 0):
             return
-        batch_size = max(1, SCHEMA_PROCESS_BATCH_SIZE)
-        index = 0
-
-        def run_batch() -> None:
-            nonlocal index
-            if token != getattr(self, "_schema_process_token", 0):
-                return
-            end = min(index + batch_size, total)
-            for entry in items[index:end]:
-                try:
-                    process_item(entry)
-                except Exception as error:
-                    self.log.error(f"Error processing schema entry: {error}")
-            index = end
-            if index >= total:
-                on_complete()
-                return
-            schedule_next()
-
-        def schedule_next() -> None:
-            try:
-                from sqlit.domains.shell.app.idle_scheduler import Priority, get_idle_scheduler
-            except Exception:
-                scheduler = None
-            else:
-                scheduler = get_idle_scheduler()
-            if scheduler:
-                scheduler.request_idle_callback(
-                    run_batch,
-                    priority=Priority.LOW,
-                    name="schema-process",
-                )
-            else:
-                self.set_timer(0.001, run_batch)
-
-        schedule_next()
+        try:
+            for entry in items:
+                process_item(entry)
+        except Exception as error:
+            self.log.error(f"Error processing schema entry: {error}")
+        on_complete()
 
     def _schema_job_complete(self: AutocompleteMixinHost) -> None:
         """Called when a schema loading job completes."""
