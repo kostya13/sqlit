@@ -149,11 +149,40 @@ class TreeFilterMixin:
             self._select_and_activate_after_refresh(fresh_node)
 
     def _select_and_activate_after_refresh(self: TreeFilterMixinHost, node: Any) -> None:
-        try:
-            self.object_tree.move_cursor(node)
-        except Exception:
-            pass
-        self._activate_tree_node(node)
+        """Move the cursor onto `node` and activate it.
+
+        `move_cursor` reads `node._line`, which the Tree recomputes during
+        layout. Right after the snapshot restore the lines are stale, so a
+        single call can park the cursor on the wrong row. Retry on
+        subsequent refreshes until the cursor actually lands on the node
+        (bounded), then activate it.
+        """
+        tree = self.object_tree
+        if tree.cursor_node is not node:
+            try:
+                tree.move_cursor(node)
+            except Exception:
+                pass
+
+        def retry(remaining: int) -> None:
+            if tree.cursor_node is node or remaining <= 0:
+                self._activate_tree_node(node)
+                return
+            try:
+                tree.move_cursor(node)
+            except Exception:
+                pass
+            call_after = getattr(self, "call_after_refresh", None)
+            if callable(call_after):
+                call_after(lambda: retry(remaining - 1))
+            else:
+                self._activate_tree_node(node)
+
+        call_after = getattr(self, "call_after_refresh", None)
+        if callable(call_after):
+            call_after(lambda: retry(4))
+        else:
+            retry(0)
 
     def _find_node_by_data(self: TreeFilterMixinHost, data: Any) -> Any | None:
         """Locate the node in the current tree whose `.data` is `data`."""
