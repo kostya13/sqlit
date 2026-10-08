@@ -151,14 +151,22 @@ class PostgresBaseAdapter(CursorBasedAdapter):
         return True
 
     def get_indexes(self, conn: Any, database: str | None = None) -> list[IndexInfo]:
-        """Get indexes from PostgreSQL."""
+        """Get indexes from PostgreSQL.
+
+        Reads pg_index/pg_class directly: avoids rendering indexdef for every
+        row (pg_indexes calls pg_get_indexdef per index), which dominates the
+        query time on catalogs with tens of thousands of indexes.
+        """
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT indexname, tablename, "
-            "  CASE WHEN indexdef LIKE '%UNIQUE%' THEN true ELSE false END as is_unique "
-            "FROM pg_indexes "
-            "WHERE schemaname NOT IN ('pg_catalog', 'information_schema') "
-            "ORDER BY tablename, indexname"
+            "SELECT idx.relname, tbl.relname, ix.indisunique "
+            "FROM pg_index ix "
+            "JOIN pg_class idx ON idx.oid = ix.indexrelid "
+            "JOIN pg_class tbl ON tbl.oid = ix.indrelid "
+            "JOIN pg_namespace ns ON ns.oid = tbl.relnamespace "
+            "WHERE ns.nspname NOT IN ('pg_catalog', 'information_schema') "
+            "AND tbl.relkind IN ('r', 'm', 'p') "
+            "ORDER BY tbl.relname, idx.relname"
         )
         return [
             IndexInfo(name=row[0], table_name=row[1], is_unique=row[2])

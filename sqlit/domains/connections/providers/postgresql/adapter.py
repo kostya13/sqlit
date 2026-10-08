@@ -95,6 +95,17 @@ class PostgreSQLAdapter(PostgresBaseAdapter):
         connect_args: dict[str, Any] = {
             "connect_timeout": 10,
             "database": endpoint.database or "postgres",
+            # Kerberos negotiation ("prefer") costs ~60 ms per connect even
+            # on servers without GSS support. Disable unless overridden.
+            "gssencmode": "disable",
+            # Detect dead/stalled peers instead of blocking a socket read
+            # forever: a wedged query (e.g. on an unresponsive DBaaS) would
+            # otherwise stall app shutdown for minutes. Probe after 60 s of
+            # silence, every 10 s, 6 failures => ~2 min upper bound.
+            "keepalives": 1,
+            "keepalives_idle": 60,
+            "keepalives_interval": 10,
+            "keepalives_count": 6,
         }
         host = endpoint.host
         # If the user only set a port (e.g. Postgres on a non-default port

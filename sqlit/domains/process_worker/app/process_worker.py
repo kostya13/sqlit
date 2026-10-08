@@ -67,6 +67,8 @@ class _WorkerState:
     conn: Connection
     provider_cache: dict[str, Any] = field(default_factory=dict)
     tunnel: Any | None = None
+    schema_conn: Any | None = None
+    schema_conn_key: tuple[Any, ...] | None = None
     tunnel_key: tuple[Any, ...] | None = None
     current_id: int | None = None
     current_query: CancellableQuery | None = None
@@ -120,6 +122,75 @@ class _WorkerState:
                 pass
             self.tunnel = None
         self.tunnel_key = None
+
+    def _close_schema_conn(self) -> None:
+        if self.schema_conn is not None:
+            try:
+                close_fn = getattr(self.schema_conn, "close", None)
+                if callable(close_fn):
+                    close_fn()
+            except Exception:
+                pass
+            self.schema_conn = None
+        self.schema_conn_key = None
+
+    def _schema_conn_key(self, provider: Any, config: ConnectionConfig) -> tuple[Any, ...]:
+        endpoint = config.tcp_endpoint
+        return (
+            id(provider),
+            getattr(endpoint, "host", None),
+            getattr(endpoint, "port", None),
+            getattr(endpoint, "database", None),
+            getattr(endpoint, "username", None),
+        )
+
+    def _acquire_schema_conn(self, provider: Any, config: ConnectionConfig, tunnel: Any | None) -> Any:
+        """Reuse a cached schema connection when the target matches, else reconnect.
+
+        Schema requests arrive in bursts (one per explorer folder), so keeping the
+        connection warm avoids a fresh TCP/auth handshake per request. The key
+        includes the provider identity so a different db_type forces a reconnect.
+        """
+        key = self._schema_conn_key(provider, config)
+        if key != self.schema_conn_key:
+            self._close_schema_conn()
+        elif self.schema_conn is not None:
+            try:
+                cursor = self.schema_conn.cursor()
+                cursor.execute("SELECT 1")
+                cursor.close()
+                return self.schema_conn
+            except Exception:
+                self._close_schema_conn()
+        conn = provider.connection_factory.connect(config)
+        try:
+            provider.post_connect(conn, config)
+        except Exception:
+            pass
+        self.schema_conn = conn
+        self.schema_conn_key = key
+        return conn
+
+    def _release_schema_conn(self, conn: Any) -> None:
+        """Keep the connection cached; drop only if it died."""
+        if conn is not self.schema_conn:
+            try:
+                close_fn = getattr(conn, "close", None)
+                if callable(close_fn):
+                    close_fn()
+            except Exception:
+                pass
+
+    def _adjust_for_tunnel(self, config: ConnectionConfig, tunnel: Any | None) -> ConnectionConfig:
+        if tunnel is None:
+            return config
+        try:
+            local_port = getattr(tunnel, "local_bind_port", None)
+        except Exception:
+            local_port = None
+        if local_port:
+            return config.with_endpoint(host="127.0.0.1", port=str(local_port))
+        return config
 
     def _start_query(self, message: dict[str, Any]) -> None:
         query_id = int(message.get("id", 0))
@@ -313,19 +384,8 @@ class _WorkerState:
         def run() -> None:
             conn = None
             try:
-                connect_config = config
-                if tunnel is not None:
-                    try:
-                        local_port = getattr(tunnel, "local_bind_port", None)
-                    except Exception:
-                        local_port = None
-                    if local_port:
-                        connect_config = config.with_endpoint(host="127.0.0.1", port=str(local_port))
-                conn = provider.connection_factory.connect(connect_config)
-                try:
-                    provider.post_connect(conn, connect_config)
-                except Exception:
-                    pass
+                connect_config = self._adjust_for_tunnel(config, tunnel)
+                conn = self._acquire_schema_conn(provider, connect_config, tunnel)
                 inspector = provider.schema_inspector
                 columns = inspector.get_columns(conn, name, db_arg, schema)
                 self.send(
@@ -354,12 +414,7 @@ class _WorkerState:
                     )
             finally:
                 if conn is not None:
-                    try:
-                        close_fn = getattr(conn, "close", None)
-                        if callable(close_fn):
-                            close_fn()
-                    except Exception:
-                        pass
+                    self._release_schema_conn(conn)
 
         self.current_thread = threading.Thread(target=run, daemon=True)
         self.current_thread.start()
@@ -416,19 +471,8 @@ class _WorkerState:
         def run() -> None:
             conn = None
             try:
-                connect_config = config
-                if tunnel is not None:
-                    try:
-                        local_port = getattr(tunnel, "local_bind_port", None)
-                    except Exception:
-                        local_port = None
-                    if local_port:
-                        connect_config = config.with_endpoint(host="127.0.0.1", port=str(local_port))
-                conn = provider.connection_factory.connect(connect_config)
-                try:
-                    provider.post_connect(conn, connect_config)
-                except Exception:
-                    pass
+                connect_config = self._adjust_for_tunnel(config, tunnel)
+                conn = self._acquire_schema_conn(provider, connect_config, tunnel)
                 inspector = provider.schema_inspector
                 items: list[Any] = []
                 if folder_type == "tables":
@@ -488,12 +532,7 @@ class _WorkerState:
                     )
             finally:
                 if conn is not None:
-                    try:
-                        close_fn = getattr(conn, "close", None)
-                        if callable(close_fn):
-                            close_fn()
-                    except Exception:
-                        pass
+                    self._release_schema_conn(conn)
 
         self.current_thread = threading.Thread(target=run, daemon=True)
         self.current_thread.start()
@@ -554,6 +593,7 @@ def run_process_worker(conn: Connection) -> None:
                     state._cancel_current(int(message.get("id", 0)))
     finally:
         state._cancel_current(state.current_id or 0)
+        state._close_schema_conn()
         state._close_tunnel()
         try:
             conn.close()
