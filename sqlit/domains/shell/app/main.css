@@ -274,3 +274,7 @@
     #autocomplete-dropdown.visible {
         display: block;
     }
+
+    * {
+        scrollbar-size: 1 1;
+    }
