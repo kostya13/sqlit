@@ -297,7 +297,7 @@ class ResultsMixin:
             try:
                 from sqlit.shared.ui.widgets_stacked_results import ResultSection, StackedResultsContainer
 
-                container = self.query_one("#stacked-results", StackedResultsContainer)
+                container = self.results_area.query_one("#stacked-results", StackedResultsContainer)
                 focused_table = next(
                     (table for table in container.query(SqlitDataTable) if table.has_focus),
                     None,
@@ -429,7 +429,7 @@ class ResultsMixin:
 
         # Show inline value view
         try:
-            value_view = self.query_one("#value-view", InlineValueView)
+            value_view = self.results_area.query_one("#value-view", InlineValueView)
             value_view.set_value(str(value) if value is not None else "NULL", column_name)
             value_view.show()
             if hasattr(self, "_value_view_active"):
@@ -442,7 +442,7 @@ class ResultsMixin:
         from sqlit.shared.ui.widgets import InlineValueView
 
         try:
-            value_view = self.query_one("#value-view", InlineValueView)
+            value_view = self.results_area.query_one("#value-view", InlineValueView)
             if value_view.is_visible:
                 value_view.hide()
                 table, _columns, _rows, _stacked = self._get_active_results_context()
@@ -462,7 +462,7 @@ class ResultsMixin:
         from sqlit.shared.ui.widgets import InlineValueView, flash_widget
 
         try:
-            value_view = self.query_one("#value-view", InlineValueView)
+            value_view = self.results_area.query_one("#value-view", InlineValueView)
             if not value_view.is_visible:
                 return
             # In tree mode with JSON, open the yank menu
@@ -481,7 +481,7 @@ class ResultsMixin:
 
         self._clear_leader_pending()
         try:
-            value_view = self.query_one("#value-view", InlineValueView)
+            value_view = self.results_area.query_one("#value-view", InlineValueView)
             if value_view.is_visible:
                 text = value_view.get_cursor_value_json()
                 if text:
@@ -498,7 +498,7 @@ class ResultsMixin:
 
         self._clear_leader_pending()
         try:
-            value_view = self.query_one("#value-view", InlineValueView)
+            value_view = self.results_area.query_one("#value-view", InlineValueView)
             if value_view.is_visible:
                 text = value_view.get_cursor_field_json()
                 if text:
@@ -515,7 +515,7 @@ class ResultsMixin:
 
         self._clear_leader_pending()
         try:
-            value_view = self.query_one("#value-view", InlineValueView)
+            value_view = self.results_area.query_one("#value-view", InlineValueView)
             if value_view.is_visible:
                 self._copy_text(value_view.value)
                 tree = value_view.get_tree_widget()
@@ -529,7 +529,7 @@ class ResultsMixin:
         from sqlit.shared.ui.widgets import InlineValueView
 
         try:
-            value_view = self.query_one("#value-view", InlineValueView)
+            value_view = self.results_area.query_one("#value-view", InlineValueView)
             if value_view.is_visible:
                 value_view.toggle_view_mode()
                 self._update_footer_bindings()
@@ -541,7 +541,7 @@ class ResultsMixin:
         from sqlit.shared.ui.widgets import InlineValueView
 
         try:
-            value_view = self.query_one("#value-view", InlineValueView)
+            value_view = self.results_area.query_one("#value-view", InlineValueView)
             if value_view.is_visible:
                 value_view.collapse_all_nodes()
         except Exception:
@@ -552,7 +552,7 @@ class ResultsMixin:
         from sqlit.shared.ui.widgets import InlineValueView
 
         try:
-            value_view = self.query_one("#value-view", InlineValueView)
+            value_view = self.results_area.query_one("#value-view", InlineValueView)
             if value_view.is_visible:
                 value_view.expand_all_nodes()
         except Exception:
@@ -1347,7 +1347,7 @@ class ResultsMixin:
             from sqlit.shared.ui.widgets_stacked_results import StackedResultsContainer
 
             try:
-                container = self.query_one("#stacked-results", StackedResultsContainer)
+                container = self.results_area.query_one("#stacked-results", StackedResultsContainer)
                 container.clear_results()
             except Exception:
                 pass
@@ -1574,7 +1574,7 @@ class ResultsMixin:
         from sqlit.shared.ui.widgets_stacked_results import ResultSection, StackedResultsContainer
 
         try:
-            container = self.query_one("#stacked-results", StackedResultsContainer)
+            container = self.results_area.query_one("#stacked-results", StackedResultsContainer)
         except Exception:
             return
 
@@ -1599,7 +1599,7 @@ class ResultsMixin:
         from sqlit.shared.ui.widgets_stacked_results import ResultSection, StackedResultsContainer
 
         try:
-            container = self.query_one("#stacked-results", StackedResultsContainer)
+            container = self.results_area.query_one("#stacked-results", StackedResultsContainer)
         except Exception:
             return
 
@@ -1624,7 +1624,7 @@ class ResultsMixin:
         from sqlit.shared.ui.widgets_stacked_results import ResultSection, StackedResultsContainer
 
         try:
-            container = self.query_one("#stacked-results", StackedResultsContainer)
+            container = self.results_area.query_one("#stacked-results", StackedResultsContainer)
         except Exception:
             return
 

@@ -431,6 +431,16 @@ class QueryExecutionMixin(ProcessWorkerLifecycleMixin):
         return False
 
     async def _run_query_async(self: QueryMixinHost, query: str, keep_insert_mode: bool) -> None:
+        """Pin result routing to the tab that started the query."""
+        tab = self.active_query_tab
+        self._query_results_target_pane = tab
+        try:
+            await self._run_query_async_impl(query, keep_insert_mode)
+        finally:
+            if self._query_results_target_pane is tab:
+                self._query_results_target_pane = None
+
+    async def _run_query_async_impl(self: QueryMixinHost, query: str, keep_insert_mode: bool) -> None:
         """Run query asynchronously using TransactionExecutor for transaction support."""
         import asyncio
         import time
@@ -609,6 +619,16 @@ class QueryExecutionMixin(ProcessWorkerLifecycleMixin):
             self._stop_query_spinner()
 
     async def _run_query_atomic_async(self: QueryMixinHost, query: str) -> None:
+        """Pin result routing to the tab that started the query."""
+        tab = self.active_query_tab
+        self._query_results_target_pane = tab
+        try:
+            await self._run_query_atomic_async_impl(query)
+        finally:
+            if self._query_results_target_pane is tab:
+                self._query_results_target_pane = None
+
+    async def _run_query_atomic_async_impl(self: QueryMixinHost, query: str) -> None:
         """Run query atomically (BEGIN/COMMIT with rollback on error)."""
         import asyncio
         import time

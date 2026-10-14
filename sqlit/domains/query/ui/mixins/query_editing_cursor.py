@@ -94,10 +94,15 @@ class QueryEditingCursorMixin:
         self._clear_leader_pending()
         self.action_execute_query()
 
-    def action_g_execute_query_atomic(self: QueryMixinHost) -> None:
-        """Execute query as transaction via g menu (gt)."""
+    def action_g_next_query_tab(self: QueryMixinHost) -> None:
+        """Switch to the next query tab via g menu (gt)."""
         self._clear_leader_pending()
-        self.action_execute_query_atomic()
+        self.action_next_query_tab()
+
+    def action_g_previous_query_tab(self: QueryMixinHost) -> None:
+        """Switch to the previous query tab via g menu (gT)."""
+        self._clear_leader_pending()
+        self.action_previous_query_tab()
 
     def action_cursor_left(self: QueryMixinHost) -> None:
         """Move cursor left (h in normal mode), with count support."""

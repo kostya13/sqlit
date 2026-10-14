@@ -72,7 +72,7 @@ class UINavigationMixin(UIStatusMixin, UILeaderMixin):
                 from sqlit.shared.ui.widgets import SqlitDataTable
                 from sqlit.shared.ui.widgets_stacked_results import ResultSection, StackedResultsContainer
 
-                container = self.query_one("#stacked-results", StackedResultsContainer)
+                container = self.results_area.query_one("#stacked-results", StackedResultsContainer)
                 sections = list(container.query(ResultSection))
                 if sections:
                     section = next((s for s in sections if not s.collapsed), sections[0])

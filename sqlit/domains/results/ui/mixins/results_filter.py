@@ -482,7 +482,7 @@ class ResultsFilterMixin:
         from sqlit.shared.ui.widgets_stacked_results import ResultSection, StackedResultsContainer
 
         try:
-            container = self.query_one("#stacked-results", StackedResultsContainer)
+            container = self.results_area.query_one("#stacked-results", StackedResultsContainer)
         except Exception:
             return None, None
 

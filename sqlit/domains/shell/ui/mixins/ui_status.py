@@ -23,8 +23,8 @@ class UIStatusMixin:
         """Update section labels to highlight the active pane."""
         try:
             pane_explorer = self.query_one("#sidebar")
-            pane_query = self.query_one("#query-area")
-            pane_results = self.query_one("#results-area")
+            pane_query = self.active_query_tab.query_one("#query-area")
+            pane_results = self.active_query_tab.query_one("#results-area")
         except Exception:
             return
 
@@ -83,8 +83,8 @@ class UIStatusMixin:
         """
         try:
             pane_explorer = self.query_one("#sidebar")
-            pane_query = self.query_one("#query-area")
-            pane_results = self.query_one("#results-area")
+            pane_query = self.active_query_tab.query_one("#query-area")
+            pane_results = self.active_query_tab.query_one("#results-area")
         except Exception:
             return
 
@@ -138,7 +138,7 @@ class UIStatusMixin:
         from sqlit.core.vim import VimMode
 
         try:
-            query_area = self.query_one("#query-area")
+            query_area = self.active_query_tab.query_one("#query-area")
             has_query_focus = self.query_input.has_focus
         except Exception:
             return

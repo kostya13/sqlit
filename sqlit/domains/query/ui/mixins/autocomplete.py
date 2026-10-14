@@ -30,6 +30,16 @@ class AutocompleteMixin(AutocompleteSchemaMixin, AutocompleteSuggestionsMixin):
     # Structure: {db_name: {"tables": [(schema, name), ...], "views": [...], "procedures": [...]}}
     _db_object_cache: dict[str, dict[str, list[Any]]] = {}
 
+    def _is_active_query_editor(self: AutocompleteMixinHost, text_area: Any) -> bool:
+        """Whether the given editor belongs to the active query tab."""
+        if getattr(text_area, "id", None) != "query-input":
+            return False
+        try:
+            active_editor = self.active_query_tab.query_one("#query-input")
+        except Exception:
+            return False
+        return text_area is active_editor
+
     def _show_autocomplete(self: AutocompleteMixinHost, suggestions: list[str], filter_text: str) -> None:
         """Show the autocomplete dropdown with suggestions."""
 
@@ -122,7 +132,11 @@ class AutocompleteMixin(AutocompleteSchemaMixin, AutocompleteSuggestionsMixin):
         # Track user activity for idle scheduler
         on_user_activity()
 
-        if event.text_area.id != "query-input":
+        # Multiple query tabs: every tab's editor carries id "query-input".
+        # Only react to the active tab's editor — background tabs change text
+        # only programmatically, and stale dropdowns must not outlive a tab
+        # switch.
+        if not self._is_active_query_editor(event.text_area):
             return
 
         update_document_title = getattr(self, "_update_query_document_title", None)
@@ -172,6 +186,12 @@ class AutocompleteMixin(AutocompleteSchemaMixin, AutocompleteSuggestionsMixin):
         from sqlit.domains.shell.app.idle_scheduler import Priority, get_idle_scheduler
 
         self._autocomplete_debounce_timer = None
+
+        # Tab switched during the debounce window: never show a dropdown
+        # computed for a background editor.
+        if not self._is_active_query_editor(text_area):
+            self._hide_autocomplete()
+            return
 
         text = text_area.text
         cursor_loc = text_area.cursor_location
@@ -235,7 +255,8 @@ class AutocompleteMixin(AutocompleteSchemaMixin, AutocompleteSuggestionsMixin):
         if not self._autocomplete_visible:
             return
 
-        if getattr(event, "text_area", None) and getattr(event.text_area, "id", None) != "query-input":
+        text_area = getattr(event, "text_area", None)
+        if text_area is not None and not self._is_active_query_editor(text_area):
             return
 
         # If text just changed, this cursor movement is from typing - ignore it

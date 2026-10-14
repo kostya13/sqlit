@@ -531,26 +531,7 @@ class TreeMixin(TreeSchemaMixin, TreeLabelMixin):
         if self._get_node_kind(node) in ("table", "view"):
 
             def select_table() -> None:
-                self._last_query_table = {
-                    "database": data.database,
-                    "schema": data.schema,
-                    "name": data.name,
-                    "columns": [],
-                }
-                # Stash metadata so results can resolve keys without globals.
-                self._pending_result_table_info = self._last_query_table
-                self._prime_last_query_table_columns(data.database, data.schema, data.name)
-                query = self.current_provider.dialect.build_select_query(
-                    data.name,
-                    100,
-                    data.database,
-                    data.schema,
-                )
-                load_unsaved = getattr(self, "_load_unsaved_query_text", None)
-                if callable(load_unsaved):
-                    load_unsaved(query)
-                else:
-                    self.query_input.text = query
+                self._insert_select_query(data)
                 self._query_target_database = data.database
                 self.action_execute_query()
 
@@ -572,6 +553,53 @@ class TreeMixin(TreeSchemaMixin, TreeLabelMixin):
         if self._get_node_kind(node) == "sequence":
             tree_object_info.show_sequence_info(self, data)
             return
+
+    def _insert_select_query(self: TreeMixinHost, data: Any) -> None:
+        """Build the SELECT for a table/view, insert it into the active tab and
+        name that tab after the table."""
+        self._last_query_table = {
+            "database": data.database,
+            "schema": data.schema,
+            "name": data.name,
+            "columns": [],
+        }
+        # Stash metadata so results can resolve keys without globals.
+        self._pending_result_table_info = self._last_query_table
+        self._prime_last_query_table_columns(data.database, data.schema, data.name)
+        query = self.current_provider.dialect.build_select_query(
+            data.name,
+            100,
+            data.database,
+            data.schema,
+        )
+        load_unsaved = getattr(self, "_load_unsaved_query_text", None)
+        if callable(load_unsaved):
+            load_unsaved(query)
+        else:
+            self.query_input.text = query
+        # Name the active tab after the table this query was built for.
+        pane = getattr(self, "active_query_tab", None)
+        if pane is not None:
+            pane.title_base = data.name
+            sync = getattr(self, "_sync_active_query_tab_label", None)
+            if callable(sync):
+                sync()
+
+    async def action_select_table_new_tab(self: TreeMixinHost) -> None:
+        """Open the SELECT for the selected table/view in a new query tab."""
+        node = self.object_tree.cursor_node
+        if not node or not node.data:
+            return
+        if not self.current_provider or not self._session:
+            return
+        if self._get_node_kind(node) not in ("table", "view"):
+            return
+        data = node.data
+        await self.add_query_tab()
+        self._insert_select_query(data)
+        self._query_target_database = data.database
+        self.action_execute_query()
+
 
     def action_use_database(self: TreeMixinHost) -> None:
         """Toggle the selected database as the default for the current connection."""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import platform
 import subprocess
@@ -19,7 +20,8 @@ from textual.lazy import Lazy
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.timer import Timer
-from textual.widgets import Static, Tree
+from textual.widgets import ContentSwitcher, Static, TabbedContent, Tree
+from textual.widgets._tabbed_content import ContentTabs
 from textual.worker import Worker
 
 from sqlit.core.input_context import InputContext
@@ -62,6 +64,7 @@ from sqlit.shared.ui.widgets import (
     TreeFilterInput,
 )
 from sqlit.shared.ui.widgets_stacked_results import StackedResultsContainer
+from sqlit.shared.ui.widgets_query_tabs import QueryTabPane
 
 if TYPE_CHECKING:
     from sqlit.domains.connections.app.session import ConnectionSession
@@ -104,6 +107,9 @@ class SSMSTUI(
     ):
         super().__init__()
         self.services = services or build_app_services(runtime or RuntimeConfig.from_env())
+        # Tab underline and other Textual animations render as flicker over SSH;
+        # disable them entirely.
+        self.animation_level = "none"
         # A pre-spawned worker handed in from cli.py, before Textual's
         # FD set was contaminated. ProcessWorkerLifecycleMixin already
         # checks self._process_worker_client first, so seeding it here
@@ -272,7 +278,7 @@ class SSMSTUI(
                 if self.results_area.has_class("stacked-mode"):
                     from sqlit.shared.ui.widgets_stacked_results import StackedResultsContainer
 
-                    container = self.query_one("#stacked-results", StackedResultsContainer)
+                    container = self.results_area.query_one("#stacked-results", StackedResultsContainer)
                     stacked_result_count = container.section_count
                     if not has_results:
                         has_results = stacked_result_count > 0
@@ -289,7 +295,7 @@ class SSMSTUI(
             try:
                 from sqlit.shared.ui.widgets import InlineValueView
 
-                value_view = self.query_one("#value-view", InlineValueView)
+                value_view = self.results_area.query_one("#value-view", InlineValueView)
                 value_view_tree_mode = value_view._tree_mode
                 value_view_is_json = value_view._is_json
             except Exception:
@@ -516,7 +522,9 @@ class SSMSTUI(
                 )
                 self._last_action = action
                 self._last_action_at = time.perf_counter()
-                handler()
+                result = handler()
+                if asyncio.iscoroutine(result):
+                    self.run_worker(result, exclusive=False, exit_on_error=False, group="key_action")
                 event.prevent_default()
                 event.stop()
 
@@ -546,6 +554,160 @@ class SSMSTUI(
             stack_after=self._debug_screen_stack(),
         )
         return result
+
+    # ========================================================================
+    # Query tabs (TabbedContent#query-tabs)
+    # ========================================================================
+
+    _query_tab_counter: int = 0
+    # Startup keeps the focus on the explorer; the first TabActivated (mount)
+    # must not steal it into the query editor.
+    _initial_tab_activation_done: bool = False
+
+    async def add_query_tab(self: Any, title: str | None = None, *, focus: bool = True) -> QueryTabPane:
+        """Append a new query tab, switch to it and focus its editor."""
+        tabs = self.query_one("#query-tabs", TabbedContent)
+        self._query_tab_counter += 1
+        pane_id = f"query-tab-{self._query_tab_counter}"
+        pane = QueryTabPane(title or "query", id=pane_id)
+        # add_pane keeps the pane hidden until its tab becomes active.
+        await tabs.add_pane(pane)
+        tabs.active = pane_id
+        if focus:
+            editor = pane.query_one("#query-input", QueryTextArea)
+            editor.read_only = False
+            editor.focus()
+        self._sync_active_query_tab_label()
+        self._update_footer_bindings()
+        return pane
+
+    def close_active_query_tab(self: Any) -> None:
+        """Close the active query tab; the last remaining tab is cleared instead."""
+        tabs = self.query_one("#query-tabs", TabbedContent)
+        if tabs.tab_count <= 1:
+            # Single tab: keep the layout, clear the editor (old New behaviour).
+            self.query_input.text = ""
+            try:
+                self._replace_results_table([], [])
+            except Exception:
+                pass
+            reset_document = getattr(self, "_reset_query_document", None)
+            if callable(reset_document):
+                reset_document(clear_text=False)
+            return
+        pane = self.active_query_tab
+        # Dirty check: unsaved edits must prompt before the tab is destroyed.
+        transition = getattr(self, "_request_query_document_transition", None)
+        if callable(transition) and getattr(self, "_document_is_dirty", lambda: False)():
+            def discard_and_close() -> None:
+                self.run_worker(self._remove_query_tab(tabs, pane), group="query_tab_close", exclusive=False)
+            transition(discard_and_close)
+        else:
+            self.run_worker(self._remove_query_tab(tabs, pane), group="query_tab_close", exclusive=False)
+
+    async def _remove_query_tab(self: Any, tabs: TabbedContent, pane: QueryTabPane) -> None:
+        pane_id = pane.id or ""
+        panes = list(tabs.query("QueryTabPane"))
+        position = next((i for i, p in enumerate(panes) if p.id == pane_id), 0)
+        await tabs.remove_pane(pane_id)
+        remaining = [p.id for p in panes if p.id != pane_id]
+        if remaining:
+            tabs.active = remaining[max(0, min(position, len(remaining) - 1))]
+        self._sync_active_query_tab_label()
+
+    def _sync_active_query_tab_label(self: Any) -> None:
+        """Rebuild every tab label as "[N] <name>" from the pane's title_base."""
+        tabs = self.query_one("#query-tabs", TabbedContent)
+        content_tabs = tabs.get_child_by_type(ContentTabs)
+        switcher = tabs.get_child_by_type(ContentSwitcher)
+        panes = [p for p in switcher.children if isinstance(p, QueryTabPane)]
+        for index, pane in enumerate(panes, start=1):
+            tab = content_tabs.get_content_tab(pane.id or "")
+            tab.label = f"[{index}] {pane.title_base}"
+
+    def action_rename_query_tab(self: Any) -> None:
+        """Prompt for a new name of the active query tab."""
+        from sqlit.shared.ui.screens import RenameTabScreen
+
+        pane = self.active_query_tab
+        if pane is None:
+            return
+
+        def on_result(new_name: str | None) -> None:
+            if not new_name or not new_name.strip():
+                return
+            pane.title_base = new_name.strip()
+            self._sync_active_query_tab_label()
+
+        self.push_screen(RenameTabScreen(current_value=pane.title_base), on_result)
+
+    async def action_new_query(self: Any) -> None:
+        """Open a new query tab (supersedes clearing the single editor)."""
+        await self.add_query_tab()
+
+    def action_close_query_tab(self: Any) -> None:
+        """Close the active query tab."""
+        self.close_active_query_tab()
+
+    def _cycle_query_tab(self: Any, offset: int) -> None:
+        """Switch to the next/previous query tab, wrapping around."""
+        tabs = self.query_one("#query-tabs", TabbedContent)
+        panes = [p for p in tabs.get_child_by_type(ContentSwitcher).children if isinstance(p, QueryTabPane)]
+        if len(panes) < 2 or tabs.active is None:
+            return
+        try:
+            current = panes.index(tabs.active_pane)
+        except ValueError:
+            return
+        tabs.active = panes[(current + offset) % len(panes)].id
+
+    def action_next_query_tab(self: Any) -> None:
+        """Switch to the next query tab."""
+        self._cycle_query_tab(1)
+
+    def action_previous_query_tab(self: Any) -> None:
+        """Switch to the previous query tab."""
+        self._cycle_query_tab(-1)
+
+    def _cycle_to_tab_index(self: Any, index_1based: int) -> None:
+        """Switch to the Nth query tab (1-based); ignore out-of-range digits."""
+        tabs = self.query_one("#query-tabs", TabbedContent)
+        panes = [p for p in tabs.get_child_by_type(ContentSwitcher).children if isinstance(p, QueryTabPane)]
+        if not 1 <= index_1based <= len(panes):
+            return
+        tabs.active = panes[index_1based - 1].id
+
+    def on_tabbed_content_tab_activated(self: Any, event: Any) -> None:
+        """Refocus the newly selected tab's editor and refresh the footer."""
+        pane = event.pane
+        if isinstance(pane, QueryTabPane):
+            # Leaving a tab in INSERT mode must not leave that tab's editor
+            # writable: reset vim to NORMAL and lock every background editor.
+            self.vim_mode = VimMode.NORMAL
+            for other in self.query("QueryTabPane"):
+                other.query_one("#query-input", QueryTextArea).read_only = True
+                other.query_one("#query-area").remove_class(
+                    "vim-normal", "vim-insert", "vim-visual", "vim-visual-line"
+                )
+            pane_editor = pane.query_one("#query-input", QueryTextArea)
+            # On the first activation (app mount) startup flow keeps the focus
+            # on the explorer tree; only subsequent switches refocus the editor.
+            if not self._initial_tab_activation_done:
+                self._initial_tab_activation_done = True
+            else:
+                pane_editor.focus()
+            # Footer flags describe the results the user sees: resync from the
+            # newly active tab's table instead of the tab that last ran a query.
+            try:
+                pane_table = pane.query_one("#results-table")
+                row_count = pane_table.row_count
+            except Exception:
+                row_count = 0
+            if row_count == 0:
+                self._last_result_columns = []
+                self._last_result_rows = []
+                self._last_result_row_count = 0
+            self._update_footer_bindings()
 
     def _start_command_mode(self) -> None:
         if getattr(self, "_leader_pending", False) and hasattr(self, "_cancel_leader_pending"):
@@ -615,7 +777,15 @@ class SSMSTUI(
         if char == "0" and not self._count_buffer:
             return False
 
-        # Digits 1-9 always start/continue count
+        # Plain digit in NORMAL switches to that query tab (1-based, vim-tab
+        # style). A leading '0' keeps its line-start motion; count prefixes
+        # only survive when a digit sequence is already being accumulated.
+        if char != "0" and not self._count_buffer:
+            self._cycle_to_tab_index(int(char))
+            event.prevent_default()
+            event.stop()
+            return True
+
         self._append_count_digit(char)
         event.prevent_default()
         event.stop()
@@ -1060,15 +1230,34 @@ class SSMSTUI(
     def object_tree(self) -> Tree:
         return self.query_one("#object-tree", Tree)
 
+    # While a query is running, results must land in the tab that started it,
+    # even if the user switches tabs before completion. _run_query_async sets
+    # this to the originating pane; result-display code resolves widgets
+    # through the properties below.
+    _query_results_target_pane: QueryTabPane | None = None
+
+    @property
+    def _results_pane(self) -> QueryTabPane:
+        return self._query_results_target_pane or self.active_query_tab
+
+    @property
+    def active_query_tab(self) -> QueryTabPane:
+        """The pane of the currently selected query tab."""
+        tabs = self.query_one("#query-tabs", TabbedContent)
+        pane = tabs.active_pane
+        if pane is None:
+            raise RuntimeError("no active query tab")
+        return cast(QueryTabPane, pane)
+
     @property
     def query_input(self) -> QueryTextArea:
-        return self.query_one("#query-input", QueryTextArea)
+        return self.active_query_tab.query_one("#query-input", QueryTextArea)
 
     @property
     def results_table(self) -> SqlitDataTable:
         # The results table ID changes when replaced (results-table, results-table-1, etc.)
-        # Query for any DataTable within the results-area container
-        return self.query_one("#results-area DataTable")  # type: ignore[return-value]
+        # Query for any DataTable within the target pane's results-area container
+        return self._results_pane.query_one("#results-area DataTable")  # type: ignore[return-value]
 
     @property
     def sidebar(self) -> Any:
@@ -1080,11 +1269,11 @@ class SSMSTUI(
 
     @property
     def query_area(self) -> Any:
-        return self.query_one("#query-area")
+        return self._results_pane.query_one("#query-area")
 
     @property
     def results_area(self) -> Any:
-        return self.query_one("#results-area")
+        return self._results_pane.query_one("#results-area")
 
     @property
     def status_bar(self) -> Static:
@@ -1106,7 +1295,7 @@ class SSMSTUI(
 
     @property
     def results_filter_input(self) -> ResultsFilterInput:
-        return self.query_one("#results-filter", ResultsFilterInput)
+        return self._results_pane.query_one("#results-filter", ResultsFilterInput)
 
     def push_screen(
         self,
@@ -1186,21 +1375,10 @@ class SSMSTUI(
                     yield tree
 
                 with Vertical(id="main-panel"):
-                    with Container(id="query-area"):
-                        yield QueryTextArea(
-                            "",
-                            language="sql",
-                            theme="css",
-                            id="query-input",
-                            read_only=True,
-                        )
-                        yield Lazy(AutocompleteDropdown(id="autocomplete-dropdown"))
-
-                    with Container(id="results-area"):
-                        yield ResultsFilterInput(id="results-filter")
-                        yield Lazy(SqlitDataTable(id="results-table", zebra_stripes=True, show_header=False))
-                        yield StackedResultsContainer(id="stacked-results")
-                        yield InlineValueView(id="value-view")
+                    with TabbedContent(id="query-tabs"):
+                        # One pane per query tab; the pane IS the query+results
+                        # pair, so all editor/results state lives per-tab.
+                        yield QueryTabPane("query", id="query-tab-0")
 
             yield Static("", id="idle-scheduler-bar")
             yield Static("Not connected", id="status-bar")

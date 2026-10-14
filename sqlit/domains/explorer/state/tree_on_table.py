@@ -13,6 +13,7 @@ class TreeOnTableState(State):
 
     def _setup_actions(self) -> None:
         self.allows("select_table", label="Select TOP 100", help="Select TOP 100 (table/view)")
+        self.allows("select_table_new_tab", label="Select in new tab", help="Select TOP 100 in a new query tab")
 
     def get_display_bindings(self, app: InputContext) -> tuple[list[DisplayBinding], list[DisplayBinding]]:
         left: list[DisplayBinding] = []
@@ -28,6 +29,8 @@ class TreeOnTableState(State):
             )
         )
         seen.add("select_table")
+        left.append(DisplayBinding(key="S", label="Select in new tab", action="select_table_new_tab"))
+        seen.add("select_table_new_tab")
         left.append(
             DisplayBinding(
                 key=resolve_display_key("refresh_tree") or "f",

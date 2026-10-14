@@ -443,7 +443,7 @@ class QueryResultsMixin:
         from sqlit.shared.ui.widgets_stacked_results import StackedResultsContainer
 
         try:
-            return self.query_one("#stacked-results", StackedResultsContainer)
+            return self.results_area.query_one("#stacked-results", StackedResultsContainer)
         except NoMatches:
             # Container should exist in layout, but create if missing
             container = StackedResultsContainer(id="stacked-results")
@@ -454,7 +454,7 @@ class QueryResultsMixin:
         """Switch to stacked results mode (hide single table, show stacked container)."""
         self.results_area.add_class("stacked-mode")
         try:
-            stacked = self.query_one("#stacked-results")
+            stacked = self.results_area.query_one("#stacked-results")
             stacked.add_class("active")
         except Exception:
             pass
@@ -463,7 +463,7 @@ class QueryResultsMixin:
         """Switch to single result mode (show single table, hide stacked container)."""
         self.results_area.remove_class("stacked-mode")
         try:
-            stacked = self.query_one("#stacked-results")
+            stacked = self.results_area.query_one("#stacked-results")
             stacked.remove_class("active")
         except Exception:
             pass

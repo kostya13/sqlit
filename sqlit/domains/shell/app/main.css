@@ -97,7 +97,7 @@
     }
 
     #query-area {
-        height: 50%;
+        height: 33.3%;
         border: round $border;
         padding: 1;
         margin: 0;
@@ -110,7 +110,7 @@
     }
 
     #results-area {
-        height: 50%;
+        height: 66.7%;
         padding: 1;
         border: round $border;
         margin: 0;

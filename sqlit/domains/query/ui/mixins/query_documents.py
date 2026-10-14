@@ -44,6 +44,11 @@ class QueryDocumentsMixin:
         updater = getattr(self, "_sync_active_pane_title", None)
         if callable(updater):
             updater()
+        # Reflect the document state (name + dirty marker) in the active
+        # query tab label.
+        tab_sync = getattr(self, "_sync_active_query_tab_label", None)
+        if callable(tab_sync):
+            tab_sync()
 
     def _set_query_document(
         self: QueryMixinHost,
